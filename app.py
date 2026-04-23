@@ -6,21 +6,86 @@ from rapidfuzz import fuzz
 # ---------------- CONFIG ----------------
 st.set_page_config(page_title="Support Hub", layout="wide")
 
-# ---------------- DATABASE ----------------
+# ---------------- STYLE ----------------
+st.markdown("""
+<style>
+.main {background-color: #f5f7fb;}
+
+h1, h2, h3 {font-weight: 700;}
+
+.stButton>button {
+    border-radius: 12px;
+    padding: 8px 18px;
+    background-color: #4f46e5;
+    color: white;
+}
+
+section[data-testid="stSidebar"] {
+    background-color: #0f172a;
+}
+
+section[data-testid="stSidebar"] * {
+    color: white;
+}
+
+section[data-testid="stSidebar"] input {
+    color: black !important;
+    background-color: white !important;
+}
+
+.card {
+    background: white;
+    padding: 18px;
+    border-radius: 14px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    margin-bottom: 12px;
+}
+
+.badge {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.badge-blue { background: #e0e7ff; color: #3730a3; }
+.badge-green { background: #dcfce7; color: #166534; }
+.badge-yellow { background: #fef9c3; color: #854d0e; }
+.badge-red { background: #fee2e2; color: #991b1b; }
+
+a { color: #4f46e5; }
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------- DEFAULT CATEGORIES ----------------
+DEFAULT_CATEGORIES = ["EMAIL","REGISTROS","PEDIDOS","TRACKING","ETIQUETAS","JIRAS"]
+
+# ---------------- SESSION ----------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "username" not in st.session_state:
+    st.session_state.username = ""
+if "role" not in st.session_state:
+    st.session_state.role = "agent"
+if "company" not in st.session_state:
+    st.session_state.company = None
+if "edit_id" not in st.session_state:
+    st.session_state.edit_id = None
+
+# ---------------- DB ----------------
 conn = sqlite3.connect("data.db", check_same_thread=False)
 c = conn.cursor()
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS notes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT,
-    content TEXT,
-    category TEXT,
-    tags TEXT,
-    company TEXT,
-    created_at TEXT
-)
-""")
+c.execute("""CREATE TABLE IF NOT EXISTS notes (
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+title TEXT,
+content TEXT,
+category TEXT,
+tags TEXT,
+link TEXT,
+company TEXT,
+created_at TEXT)""")
 
 c.execute("""
 CREATE TABLE IF NOT EXISTS dudas (
@@ -29,11 +94,17 @@ CREATE TABLE IF NOT EXISTS dudas (
     answer TEXT,
     status TEXT,
     priority TEXT,
+    category TEXT,
     assigned_to TEXT,
     company TEXT,
     created_at TEXT
 )
 """)
+
+c.execute("""CREATE TABLE IF NOT EXISTS categories (
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+name TEXT,
+company TEXT)""")
 
 conn.commit()
 
@@ -43,54 +114,42 @@ USERS = {
     "team": {"password": "support", "role": "agent"}
 }
 
-# ---------------- SESSION STATE INIT ----------------
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-if "role" not in st.session_state:
-    st.session_state.role = None
-
-if "company" not in st.session_state:
-    st.session_state.company = None
-
 # ---------------- LOGIN ----------------
 if not st.session_state.logged_in:
     st.title("🔐 Login")
 
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+    u = st.text_input("Username")
+    p = st.text_input("Password", type="password")
 
     if st.button("Login"):
-        if username in USERS and USERS[username]["password"] == password:
+        if u in USERS and USERS[u]["password"] == p:
             st.session_state.logged_in = True
-            st.session_state.username = username
-            st.session_state.role = USERS[username]["role"]
+            st.session_state.username = u
+            st.session_state.role = USERS[u]["role"]
             st.rerun()
-        else:
-            st.error("Wrong credentials")
 
     st.stop()
 
-# ---------------- COMPANY SELECTION ----------------
+# ---------------- COMPANY ----------------
 if st.session_state.company is None:
-    st.markdown("## Select Company")
+    st.title("Select Company")
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.image("assets/tell.png", use_container_width=True)
+        st.image("assets/tell.png")
         if st.button("Tellmegen"):
             st.session_state.company = "TELLMEGEN"
             st.rerun()
 
     with col2:
-        st.image("assets/viva.png", use_container_width=True)
+        st.image("assets/viva.png")
         if st.button("Vivabioma"):
             st.session_state.company = "VIVABIOMA"
             st.rerun()
 
     with col3:
-        st.image("assets/koko.png", use_container_width=True)
+        st.image("assets/koko.png")
         if st.button("Kokogenetics"):
             st.session_state.company = "KOKOGENETICS"
             st.rerun()
@@ -98,485 +157,180 @@ if st.session_state.company is None:
     st.stop()
 
 # ---------------- SIDEBAR ----------------
-st.sidebar.title("Companies")
+st.sidebar.title(st.session_state.company)
 
-for comp in ["TELLMEGEN", "VIVABIOMA", "KOKOGENETICS"]:
-    if st.sidebar.button(comp):
-        st.session_state.company = comp
+if st.sidebar.button("🔄 Change company"):
+    st.session_state.company = None
+    st.rerun()
+
+
+menu = st.sidebar.radio("Menu", ["Search","All Notes","Add Note","Dudas"])
+
+# ---------------- CATEGORY ADD ----------------
+st.sidebar.subheader("Delete category")
+
+# carichiamo categorie esistenti
+c.execute("SELECT id, name FROM categories WHERE company=?", (st.session_state.company,))
+cats = c.fetchall()
+
+cat_dict = {f"{c[1]}": c[0] for c in cats}
+
+cat_to_delete = st.sidebar.selectbox("Select category", list(cat_dict.keys()) if cat_dict else ["None"])
+
+if st.sidebar.button("Delete category"):
+    if cats:
+        c.execute("DELETE FROM categories WHERE id=?", (cat_dict[cat_to_delete],))
+        conn.commit()
+        st.sidebar.success("Category deleted")
         st.rerun()
 
-st.sidebar.divider()
 
-menu = st.sidebar.radio("Menu", [
-    "Search",
-    "All Notes",
-    "Add Note",
-    "Dudas"
-])
+new_cat = st.sidebar.text_input("New category")
+if st.sidebar.button("Add category"):
+    if new_cat:
+        c.execute("INSERT INTO categories VALUES (NULL,?,?)",
+                  (new_cat.upper(), st.session_state.company))
+        conn.commit()
+        st.rerun()
+
+# ---------------- LOAD CATEGORIES ----------------
+c.execute("SELECT name FROM categories WHERE company=?", (st.session_state.company,))
+db_cat = [x[0] for x in c.fetchall()]
+categories = sorted(list(set(DEFAULT_CATEGORIES + db_cat)))
 
 # ---------------- SEARCH ----------------
 if menu == "Search":
-    st.subheader(f"Search - {st.session_state.company}")
+    st.title("Search")
 
-    query = st.text_input("Search anything")
+    q = st.text_input("Search")
 
-    if query:
+    if q:
         c.execute("SELECT * FROM notes WHERE company=?", (st.session_state.company,))
         notes = c.fetchall()
 
-        results = []
-
         for n in notes:
             text = f"{n[1]} {n[2]} {n[4]}"
-            score = fuzz.token_set_ratio(query.lower(), text.lower())
+            score = fuzz.token_set_ratio(q.lower(), text.lower())
 
             if score > 30:
-                results.append((score, n))
-
-        results.sort(reverse=True, key=lambda x: x[0])
-
-        for score, r in results:
-            with st.expander(f"{r[1]} ({r[3]}) - {score}%"):
-                st.markdown(r[2])
-                st.caption(f"Tags: {r[4]} | {r[6]}")
+                st.markdown(f"""
+                <div class="card">
+                <h4>{n[1]}</h4>
+                <div class="badge badge-blue">{n[3]}</div>
+                <p>{n[2]}</p>
+                </div>
+                """, unsafe_allow_html=True)
 
 # ---------------- ALL NOTES ----------------
 elif menu == "All Notes":
-    st.subheader(f"Notes - {st.session_state.company}")
+    st.title("All Notes")
 
-    c.execute("""
-        SELECT * FROM notes
-        WHERE company=?
-        ORDER BY created_at DESC
-    """, (st.session_state.company,))
-
+    c.execute("SELECT * FROM notes WHERE company=? ORDER BY created_at DESC",
+              (st.session_state.company,))
     notes = c.fetchall()
 
     for n in notes:
-        with st.expander(f"{n[1]} ({n[3]})"):
-            st.markdown(n[2])
-            st.caption(f"Tags: {n[4]} | {n[6]}")
+        with st.expander(n[1]):
 
-            if st.session_state.role == "admin":
-                if st.button(f"Delete {n[0]}", key=f"del_{n[0]}"):
-                    c.execute("DELETE FROM notes WHERE id=?", (n[0],))
+            if st.session_state.edit_id != n[0]:
+                st.markdown(f"""
+                <div class="card">
+                <div class="badge badge-blue">{n[3]}</div>
+                <p>{n[2]}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                if n[5]:
+                    st.markdown(f'<a href="{n[5]}" target="_blank">🔗 Open link</a>', unsafe_allow_html=True)
+
+                col1, col2 = st.columns(2)
+
+                if col1.button("Edit", key=f"e{n[0]}"):
+                    st.session_state.edit_id = n[0]
+
+                if st.session_state.role == "admin":
+                    if col2.button("Delete", key=f"d{n[0]}"):
+                        c.execute("DELETE FROM notes WHERE id=?", (n[0],))
+                        conn.commit()
+                        st.rerun()
+
+            else:
+                t = st.text_input("Title", value=n[1], key=f"t{n[0]}")
+                ctt = st.text_area("Content", value=n[2], key=f"c{n[0]}")
+                l = st.text_input("Link", value=n[5], key=f"l{n[0]}")
+
+                if st.button("Save", key=f"s{n[0]}"):
+                    c.execute("UPDATE notes SET title=?,content=?,link=? WHERE id=?",
+                              (t, ctt, l, n[0]))
                     conn.commit()
-                    st.warning("Deleted")
+                    st.session_state.edit_id = None
                     st.rerun()
 
 # ---------------- ADD NOTE ----------------
 elif menu == "Add Note":
-    st.subheader("Add Note")
+    st.title("Add Note")
 
-    title = st.text_input("Title")
-    content = st.text_area("Content")
-
-    category = st.selectbox("Category", [
-        "EMAIL", "RECOGIDAS", "PEDIDOS",
-        "TRACKING", "ETIQUETAS", "JIRAS"
-    ])
-
+    t = st.text_input("Title")
+    ctt = st.text_area("Content")
+    cat = st.selectbox("Category", categories)
     tags = st.text_input("Tags")
+    link = st.text_input("Link")
 
     if st.button("Save"):
-        if title.strip() == "" or content.strip() == "":
-            st.error("Fill all fields")
-        else:
-            c.execute("""
-                INSERT INTO notes (title, content, category, tags, company, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                title,
-                content,
-                category,
-                tags,
-                st.session_state.company,
-                datetime.now().strftime("%Y-%m-%d %H:%M")
-            ))
+        c.execute("""INSERT INTO notes
+        VALUES (NULL,?,?,?,?,?,?,?)""",
+        (t, ctt, cat, tags, link,
+         st.session_state.company,
+         datetime.now().strftime("%Y-%m-%d %H:%M")))
 
-            conn.commit()
-            st.success("Saved!")
-            st.rerun()
+        conn.commit()
+        st.toast("Saved ✅")
+        st.rerun()
 
-# ---------------- DUDAS (TICKETS) ----------------
+# ---------------- DUDAS ----------------
 elif menu == "Dudas":
-    st.subheader("🎫 Support Tickets")
+    st.title("Tickets")
 
-    question = st.text_input("New ticket / doubt")
-    priority = st.selectbox("Priority", ["LOW", "MEDIUM", "HIGH"])
+    q = st.text_input("New ticket")
+    pr = st.selectbox("Priority", ["LOW","MEDIUM","HIGH"])
 
-    if st.button("Submit Ticket"):
-        if question.strip() == "":
-            st.error("Write a ticket first")
-        else:
-            c.execute("""
-                INSERT INTO dudas (
-                    question, answer, status, priority, assigned_to, company, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                question,
-                "",
-                "open",
-                priority,
-                "unassigned",
-                st.session_state.company,
-                datetime.now().strftime("%Y-%m-%d %H:%M")
-            ))
+    if st.button("Create"):
+        c.execute("""
+        INSERT INTO dudas (
+            question, answer, status, priority, category, assigned_to, company, created_at
+        )
+        VALUES (?,?,?,?,?,?,?,?)
+        """, (
+            q,
+            "",
+            "open",
+            pr,
+            "GENERAL",
+            "unassigned",
+            st.session_state.company,
+            datetime.now().strftime("%Y-%m-%d %H:%M")
+        ))
 
-            conn.commit()
-            st.success("Ticket created!")
-            st.rerun()
 
-    st.divider()
-
-    c.execute("""
-        SELECT * FROM dudas
-        WHERE status='open' AND company=?
-        ORDER BY created_at DESC
-    """, (st.session_state.company,))
-
+    c.execute("SELECT * FROM dudas WHERE status='open'")
     dudas = c.fetchall()
 
     for d in dudas:
-        priority = d[4]
-
-        emoji = "🟢"
-        if priority == "MEDIUM":
-            emoji = "🟡"
-        elif priority == "HIGH":
-            emoji = "🔴"
-
-        with st.expander(f"{emoji} [{priority}] {d[1]}"):
-
-            st.write(d[1])
-
-            answer = st.text_area("Answer", key=f"ans_{d[0]}")
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                if st.button("Resolve", key=f"resolve_{d[0]}"):
-                    c.execute("""
-                        UPDATE dudas
-                        SET answer=?, status='closed'
-                        WHERE id=?
-                    """, (answer, d[0]))
-
-                    conn.commit()
-                    st.success("Resolved!")
-                    st.rerun()
-
-            with col2:
-                if st.session_state.role == "admin":
-                    if st.button("Delete", key=f"delete_{d[0]}"):
-                        c.execute("DELETE FROM dudas WHERE id=?", (d[0],))
-                        conn.commit()
-                        st.warning("Deleted")
-                        st.rerun()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        color = "badge-green"
+        if d[4] == "MEDIUM": color = "badge-yellow"
+        if d[4] == "HIGH": color = "badge-red"
+
+        with st.expander(d[1]):
+            st.markdown(f'<div class="badge {color}">{d[4]}</div>', unsafe_allow_html=True)
+
+            ans = st.text_area("Answer", key=f"a{d[0]}")
+
+            if st.button("Resolve", key=f"r{d[0]}"):
+                c.execute("""
+                UPDATE dudas
+                SET answer=?, status='closed', category=?
+                WHERE id=?
+                """, (ans, "RESOLVED", d[0]))
+
+                conn.commit()
+                st.rerun()
